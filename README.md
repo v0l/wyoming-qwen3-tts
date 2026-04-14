@@ -7,7 +7,7 @@ Wyoming protocol TTS server using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-
 - 9 built-in voices (English, Chinese, Japanese, Korean)
 - GPU-accelerated with CUDA + flash-attn
 - Streaming audio output via Wyoming protocol
-- ARM64 compatible (NVIDIA Grace/GB10, etc.)
+- Multi-arch: ARM64 and AMD64
 
 ## Voices
 
@@ -24,6 +24,21 @@ Wyoming protocol TTS server using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-
 | Sohee | Warm Korean female voice with rich emotion | Korean |
 
 All voices support all 10 languages (Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian) via auto-detection.
+
+## Build Args
+
+| Arg | Default | Options | Description |
+|-----|---------|---------|-------------|
+| `ARCH` | `arm64` | `arm64`, `amd64` | Target architecture |
+| `CUDA` | `130` | `126`, `128`, `130` | CUDA toolkit version (12.6, 12.8, 13.0) |
+
+```bash
+# ARM64 + CUDA 13.0 (default)
+docker compose build
+
+# AMD64 + CUDA 12.8
+docker compose build --build-arg ARCH=amd64 --build-arg CUDA=128
+```
 
 ## Docker Compose
 
@@ -78,4 +93,4 @@ volumes:
 
 - First run downloads the model (~4GB) + tokenizer (~1GB). Subsequent runs use the HuggingFace cache.
 - Mount `~/.cache/huggingface` to avoid re-downloading across container restarts.
-- Flash-attn v2 is installed via prebuilt wheels for ARM64 + CUDA 13.0.
+- Flash-attn v2 is installed via prebuilt wheels from [flash-attention-prebuild-wheels](https://github.com/mjun0812/flash-attention-prebuild-wheels).
