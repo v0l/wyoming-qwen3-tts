@@ -3,7 +3,9 @@
 
 import argparse
 import asyncio
+import glob
 import logging
+import os
 
 import numpy as np
 import soundfile as sf
@@ -12,7 +14,7 @@ from qwen_tts import Qwen3TTSModel
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
-from wyoming.server import AsyncEventHandler, AsyncServer, AsyncTcpServer
+from wyoming.server import AsyncEventHandler, AsyncServer
 from wyoming.tts import Synthesize, SynthesizeStopped
 
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
 SAMPLES_PER_CHUNK = 1024
+CLONE_VOICES_DIR = "/data/clone-voices"
 
 SPEAKERS = {
     "Vivian": {
@@ -49,11 +52,41 @@ SPEAKERS = {
 }
 
 
+def load_clone_voices() -> dict[str, dict]:
+    clone_voices = {}
+    if not os.path.isdir(CLONE_VOICES_DIR):
+        return clone_voices
+
+    for ref_file in sorted(glob.glob(os.path.join(CLONE_VOICES_DIR, "*.wav"))):
+        name = os.path.splitext(os.path.basename(ref_file))[0]
+        txt_file = os.path.join(CLONE_VOICES_DIR, f"{name}.txt")
+        if not os.path.isfile(txt_file):
+            _LOGGER.warning("Skipping clone voice '%s': no matching .txt file", name)
+            continue
+        with open(txt_file, "r") as f:
+            ref_text = f.read().strip()
+        if not ref_text:
+            _LOGGER.warning("Skipping clone voice '%s': empty ref text", name)
+            continue
+        clone_voices[name] = {"ref_audio": ref_file, "ref_text": ref_text}
+        _LOGGER.info("Loaded clone voice: %s", name)
+
+    return clone_voices
+
+
 class Qwen3TTSEventHandler(AsyncEventHandler):
-    def __init__(self, wyoming_info: Info, model: Qwen3TTSModel, *args, **kwargs):
+    def __init__(
+        self,
+        wyoming_info: Info,
+        model: Qwen3TTSModel,
+        clone_voices: dict[str, dict],
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.wyoming_info_event = wyoming_info.event()
         self.model = model
+        self.clone_voices = clone_voices
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
@@ -86,10 +119,7 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
         if synthesize.voice is not None:
             voice_name = synthesize.voice.name
 
-        speaker = voice_name or "Ryan"
-        if speaker not in SPEAKERS:
-            _LOGGER.warning("Unknown speaker '%s', falling back to Ryan", speaker)
-            speaker = "Ryan"
+        is_clone = voice_name is not None and voice_name in self.clone_voices
 
         await self.write_event(
             AudioStart(
@@ -100,9 +130,18 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
         )
 
         loop = asyncio.get_event_loop()
-        audio_array, sr = await loop.run_in_executor(
-            None, self._generate_audio, text, speaker
-        )
+        if is_clone:
+            audio_array, sr = await loop.run_in_executor(
+                None, self._generate_clone_audio, text, voice_name
+            )
+        else:
+            speaker = voice_name or "Ryan"
+            if speaker not in SPEAKERS:
+                _LOGGER.warning("Unknown speaker '%s', falling back to Ryan", speaker)
+                speaker = "Ryan"
+            audio_array, sr = await loop.run_in_executor(
+                None, self._generate_audio, text, speaker
+            )
 
         for i in range(0, len(audio_array), SAMPLES_PER_CHUNK):
             chunk = audio_array[i : i + SAMPLES_PER_CHUNK]
@@ -125,19 +164,31 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
             language="Auto",
             speaker=speaker,
         )
-        audio_float = wavs[0]
+        return self._normalize(wavs[0]), sr
+
+    def _generate_clone_audio(
+        self, text: str, voice_name: str
+    ) -> tuple[np.ndarray, int]:
+        voice = self.clone_voices[voice_name]
+        _LOGGER.info("Voice cloning with '%s'", voice_name)
+        wavs, sr = self.model.generate_voice_clone(
+            text=text,
+            language="Auto",
+            ref_audio=voice["ref_audio"],
+            ref_text=voice["ref_text"],
+        )
+        return self._normalize(wavs[0]), sr
+
+    def _normalize(self, audio_float: np.ndarray) -> np.ndarray:
         if audio_float.dtype != np.int16:
             max_val = np.max(np.abs(audio_float))
             if max_val > 1.0:
                 audio_float = audio_float / max_val
-            audio_int16 = (audio_float * 32767).astype(np.int16)
-        else:
-            audio_int16 = audio_float
-
-        return audio_int16, sr
+            return (audio_float * 32767).astype(np.int16)
+        return audio_float
 
 
-def build_wyoming_info() -> Info:
+def build_wyoming_info(clone_voices: dict[str, dict]) -> Info:
     voices = []
     for name, info in SPEAKERS.items():
         voices.append(
@@ -148,6 +199,18 @@ def build_wyoming_info() -> Info:
                 installed=True,
                 version="1.0",
                 languages=[info["language"], "en"],
+            )
+        )
+
+    for name, info in clone_voices.items():
+        voices.append(
+            TtsVoice(
+                name=name,
+                description=f"{name} (cloned voice)",
+                attribution=Attribution(name="User", url=""),
+                installed=True,
+                version="1.0",
+                languages=["en"],
             )
         )
 
@@ -195,12 +258,20 @@ async def main() -> None:
     )
     _LOGGER.info("Model loaded on %s", device)
 
-    wyoming_info = build_wyoming_info()
+    clone_voices = load_clone_voices()
+    if clone_voices:
+        _LOGGER.info("Loaded %d clone voice(s)", len(clone_voices))
+    else:
+        _LOGGER.info("No clone voices found in %s", CLONE_VOICES_DIR)
+
+    wyoming_info = build_wyoming_info(clone_voices)
     server = AsyncServer.from_uri(args.uri)
 
     _LOGGER.info("Starting TTS server at %s", args.uri)
     await server.run(
-        lambda reader, writer: Qwen3TTSEventHandler(wyoming_info, model, reader, writer)
+        lambda reader, writer: Qwen3TTSEventHandler(
+            wyoming_info, model, clone_voices, reader, writer
+        )
     )
 
 
