@@ -23,7 +23,7 @@ RUN if [ "$ARCH" = "amd64" ]; then \
 
 ENV HF_HOME=/data/huggingface
 
-COPY . .
+COPY server.py .
 
 EXPOSE 10200
 
