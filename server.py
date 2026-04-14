@@ -24,6 +24,9 @@ SAMPLE_RATE = 24000
 SAMPLES_PER_CHUNK = 1024
 CLONE_VOICES_DIR = "/data/clone-voices"
 
+CUSTOM_VOICE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+BASE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+
 SPEAKERS = {
     "Vivian": {
         "description": "Bright, slightly edgy young female voice",
@@ -78,14 +81,16 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
     def __init__(
         self,
         wyoming_info: Info,
-        model: Qwen3TTSModel,
+        custom_voice_model: Qwen3TTSModel,
+        base_model: Qwen3TTSModel | None,
         clone_voices: dict[str, dict],
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.wyoming_info_event = wyoming_info.event()
-        self.model = model
+        self.custom_voice_model = custom_voice_model
+        self.base_model = base_model
         self.clone_voices = clone_voices
 
     async def handle_event(self, event: Event) -> bool:
@@ -131,6 +136,11 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
 
         loop = asyncio.get_event_loop()
         if is_clone:
+            if self.base_model is None:
+                _LOGGER.error("Voice cloning requires the base model")
+                await self.write_event(AudioStop().event())
+                await self.write_event(SynthesizeStopped().event())
+                return
             audio_array, sr = await loop.run_in_executor(
                 None, self._generate_clone_audio, text, voice_name
             )
@@ -159,7 +169,7 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
         _LOGGER.info("Finished synthesizing: '%s'", text[:50])
 
     def _generate_audio(self, text: str, speaker: str) -> tuple[np.ndarray, int]:
-        wavs, sr = self.model.generate_custom_voice(
+        wavs, sr = self.custom_voice_model.generate_custom_voice(
             text=text,
             language="Auto",
             speaker=speaker,
@@ -171,7 +181,7 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
     ) -> tuple[np.ndarray, int]:
         voice = self.clone_voices[voice_name]
         _LOGGER.info("Voice cloning with '%s'", voice_name)
-        wavs, sr = self.model.generate_voice_clone(
+        wavs, sr = self.base_model.generate_voice_clone(
             text=text,
             language="Auto",
             ref_audio=voice["ref_audio"],
@@ -237,8 +247,13 @@ async def main() -> None:
     parser.add_argument("--uri", default="tcp://0.0.0.0:10200", help="Server URI")
     parser.add_argument(
         "--model",
-        default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        help="Model name",
+        default=CUSTOM_VOICE_MODEL,
+        help="CustomVoice model name",
+    )
+    parser.add_argument(
+        "--base-model",
+        default=BASE_MODEL,
+        help="Base model name for voice cloning",
     )
     parser.add_argument("--speaker", default="Ryan", help="Default speaker")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -247,19 +262,27 @@ async def main() -> None:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    _LOGGER.info("Loading Qwen3-TTS model: %s", args.model)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-    model = Qwen3TTSModel.from_pretrained(
+    _LOGGER.info("Loading CustomVoice model: %s", args.model)
+    custom_voice_model = Qwen3TTSModel.from_pretrained(
         args.model,
         device_map=device,
         dtype=dtype,
     )
-    _LOGGER.info("Model loaded on %s", device)
+    _LOGGER.info("CustomVoice model loaded on %s", device)
 
     clone_voices = load_clone_voices()
+    base_model = None
     if clone_voices:
+        _LOGGER.info("Loading Base model for voice cloning: %s", args.base_model)
+        base_model = Qwen3TTSModel.from_pretrained(
+            args.base_model,
+            device_map=device,
+            dtype=dtype,
+        )
+        _LOGGER.info("Base model loaded on %s", device)
         _LOGGER.info("Loaded %d clone voice(s)", len(clone_voices))
     else:
         _LOGGER.info("No clone voices found in %s", CLONE_VOICES_DIR)
@@ -270,7 +293,7 @@ async def main() -> None:
     _LOGGER.info("Starting TTS server at %s", args.uri)
     await server.run(
         lambda reader, writer: Qwen3TTSEventHandler(
-            wyoming_info, model, clone_voices, reader, writer
+            wyoming_info, custom_voice_model, base_model, clone_voices, reader, writer
         )
     )
 
