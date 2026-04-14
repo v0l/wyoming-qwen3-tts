@@ -89,6 +89,23 @@ volumes:
 | `--speaker` | `Ryan` | Default speaker |
 | `--debug` | off | Enable debug logging |
 
+## Voice Cloning
+
+Place reference audio files in `/data/clone-voices/` (inside container). Each voice needs a matching `.wav` + `.txt` pair:
+
+```
+/data/clone-voices/
+├── my_voice.wav      # Reference audio (3-30 seconds, mono or stereo)
+└── my_voice.txt      # Exact transcript of the audio
+```
+
+Clone voices appear as additional voices in Home Assistant. Example docker-compose volume:
+
+```yaml
+volumes:
+  - ./clone-voices:/data/clone-voices
+```
+
 ## Notes
 
 - First run downloads the model (~4GB) + tokenizer (~1GB). Subsequent runs use the HuggingFace cache.
