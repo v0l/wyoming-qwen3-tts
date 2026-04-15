@@ -1,13 +1,14 @@
 # Wyoming Qwen3-TTS
 
-Wyoming protocol TTS server using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) with flash-attn support. Compatible with Home Assistant's Wyoming integration.
+Wyoming protocol TTS server using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) with [faster-qwen3-tts](https://github.com/your-repo/faster-qwen3-tts) for true streaming support. Compatible with Home Assistant's Wyoming integration.
 
 ## Features
 
 - 9 built-in voices (English, Chinese, Japanese, Korean)
-- GPU-accelerated with CUDA + flash-attn
+- **True streaming**: Audio chunks sent as they're generated (not after full generation)
+- GPU-accelerated with CUDA
 - Streaming audio output via Wyoming protocol
-- Multi-arch: ARM64 and AMD64
+- Supports voice cloning with reference audio
 
 ## Voices
 
@@ -29,15 +30,14 @@ All voices support all 10 languages (Chinese, English, Japanese, Korean, German,
 
 | Arg | Default | Options | Description |
 |-----|---------|---------|-------------|
-| `ARCH` | `arm64` | `arm64`, `amd64` | Target architecture |
 | `CUDA` | `130` | `126`, `128`, `130` | CUDA toolkit version (12.6, 12.8, 13.0) |
 
 ```bash
-# ARM64 + CUDA 13.0 (default)
-docker compose build
+# CUDA 13.0 (default)
+docker build -t qwen3-tts-wyoming --build-arg CUDA=130 .
 
-# AMD64 + CUDA 12.8
-docker compose build --build-arg ARCH=amd64 --build-arg CUDA=128
+# CUDA 12.8
+docker build -t qwen3-tts-wyoming --build-arg CUDA=128 .
 ```
 
 ## Docker Compose
@@ -86,6 +86,7 @@ volumes:
 |----------|---------|-------------|
 | `--uri` | `tcp://0.0.0.0:10200` | Server URI |
 | `--model` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | HuggingFace model name |
+| `--base-model` | `Qwen/Qwen3-TTS-12Hz-1.7B-Base` | Base model for voice cloning |
 | `--speaker` | `Ryan` | Default speaker |
 | `--debug` | off | Enable debug logging |
 
@@ -110,4 +111,5 @@ volumes:
 
 - First run downloads the model (~4GB) + tokenizer (~1GB). Subsequent runs use the HuggingFace cache.
 - Mount `~/.cache/huggingface` to avoid re-downloading across container restarts.
-- Flash-attn v2 is installed via prebuilt wheels from [flash-attention-prebuild-wheels](https://github.com/mjun0812/flash-attention-prebuild-wheels).
+- **True streaming**: Audio chunks are sent as they're generated, not after full text processing. This provides lower latency and allows audio to play while the rest of the text is being synthesized.
+- The server uses `faster-qwen3-tts` which handles flash-attn internally if available.
