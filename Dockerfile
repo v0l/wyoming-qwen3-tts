@@ -13,10 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir \
     torch torchaudio --index-url https://download.pytorch.org/whl/cu${CUDA}
 
-# Install TTS dependencies
-RUN pip install --no-cache-dir \
-    wyoming \
-    faster-qwen3-tts
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Hugging Face cache directory
 ENV HF_HOME=/data/huggingface
