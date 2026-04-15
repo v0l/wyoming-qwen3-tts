@@ -1,3 +1,2 @@
 wyoming
 faster-qwen3-tts
-# pyaudio requires system portaudio19-dev: sudo apt-get install portaudio19-dev
