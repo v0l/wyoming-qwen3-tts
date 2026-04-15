@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wyoming TTS server for Qwen3-TTS."""
+"""Wyoming TTS server for Qwen3-TTS with true streaming using faster-qwen3-tts."""
 
 import argparse
 import asyncio
@@ -8,9 +8,8 @@ import logging
 import os
 
 import numpy as np
-import soundfile as sf
 import torch
-from qwen_tts import Qwen3TTSModel
+from faster_qwen3_tts import FasterQwen3TTS
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
@@ -81,8 +80,8 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
     def __init__(
         self,
         wyoming_info: Info,
-        custom_voice_model: Qwen3TTSModel,
-        base_model: Qwen3TTSModel | None,
+        custom_voice_model: FasterQwen3TTS,
+        base_model: FasterQwen3TTS | None,
         clone_voices: dict[str, dict],
         *args,
         **kwargs,
@@ -127,67 +126,66 @@ class Qwen3TTSEventHandler(AsyncEventHandler):
         is_clone = voice_name is not None and voice_name in self.clone_voices
 
         await self.write_event(
-            AudioStart(
-                rate=SAMPLE_RATE,
-                width=2,
-                channels=1,
-            ).event()
+            AudioStart(rate=SAMPLE_RATE, width=2, channels=1).event()
         )
 
-        loop = asyncio.get_event_loop()
         if is_clone:
             if self.base_model is None:
                 _LOGGER.error("Voice cloning requires the base model")
                 await self.write_event(AudioStop().event())
                 await self.write_event(SynthesizeStopped().event())
                 return
-            audio_array, sr = await loop.run_in_executor(
-                None, self._generate_clone_audio, text, voice_name
-            )
+            voice = self.clone_voices[voice_name]
+            # Use true streaming generator
+            for audio_chunk, sr, _ in self.base_model.generate_voice_clone_streaming(
+                text=text,
+                language="Auto",
+                ref_audio=voice["ref_audio"],
+                ref_text=voice["ref_text"],
+            ):
+                # Normalize and chunk if needed
+                audio_array = self._normalize(audio_chunk)
+                for i in range(0, len(audio_array), SAMPLES_PER_CHUNK):
+                    chunk = audio_array[i : i + SAMPLES_PER_CHUNK]
+                    await self.write_event(
+                        AudioChunk(
+                            audio=chunk.tobytes(),
+                            rate=SAMPLE_RATE,
+                            width=2,
+                            channels=1,
+                        ).event()
+                    )
         else:
             speaker = voice_name or "Ryan"
             if speaker not in SPEAKERS:
                 _LOGGER.warning("Unknown speaker '%s', falling back to Ryan", speaker)
                 speaker = "Ryan"
-            audio_array, sr = await loop.run_in_executor(
-                None, self._generate_audio, text, speaker
-            )
-
-        for i in range(0, len(audio_array), SAMPLES_PER_CHUNK):
-            chunk = audio_array[i : i + SAMPLES_PER_CHUNK]
-            await self.write_event(
-                AudioChunk(
-                    audio=chunk.tobytes(),
-                    rate=SAMPLE_RATE,
-                    width=2,
-                    channels=1,
-                ).event()
-            )
+            # Use true streaming generator
+            for (
+                audio_chunk,
+                sr,
+                _,
+            ) in self.custom_voice_model.generate_custom_voice_streaming(
+                text=text,
+                speaker=speaker,
+                language="Auto",
+            ):
+                # Normalize and chunk if needed
+                audio_array = self._normalize(audio_chunk)
+                for i in range(0, len(audio_array), SAMPLES_PER_CHUNK):
+                    chunk = audio_array[i : i + SAMPLES_PER_CHUNK]
+                    await self.write_event(
+                        AudioChunk(
+                            audio=chunk.tobytes(),
+                            rate=SAMPLE_RATE,
+                            width=2,
+                            channels=1,
+                        ).event()
+                    )
 
         await self.write_event(AudioStop().event())
         await self.write_event(SynthesizeStopped().event())
         _LOGGER.info("Finished synthesizing: '%s'", text[:50])
-
-    def _generate_audio(self, text: str, speaker: str) -> tuple[np.ndarray, int]:
-        wavs, sr = self.custom_voice_model.generate_custom_voice(
-            text=text,
-            language="Auto",
-            speaker=speaker,
-        )
-        return self._normalize(wavs[0]), sr
-
-    def _generate_clone_audio(
-        self, text: str, voice_name: str
-    ) -> tuple[np.ndarray, int]:
-        voice = self.clone_voices[voice_name]
-        _LOGGER.info("Voice cloning with '%s'", voice_name)
-        wavs, sr = self.base_model.generate_voice_clone(
-            text=text,
-            language="Auto",
-            ref_audio=voice["ref_audio"],
-            ref_text=voice["ref_text"],
-        )
-        return self._normalize(wavs[0]), sr
 
     def _normalize(self, audio_float: np.ndarray) -> np.ndarray:
         if audio_float.dtype != np.int16:
@@ -228,7 +226,7 @@ def build_wyoming_info(clone_voices: dict[str, dict]) -> Info:
         tts=[
             TtsProgram(
                 name="qwen3-tts",
-                description="Qwen3-TTS neural text to speech",
+                description="Qwen3-TTS neural text to speech with true streaming",
                 attribution=Attribution(
                     name="Qwen",
                     url="https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
@@ -246,14 +244,10 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--uri", default="tcp://0.0.0.0:10200", help="Server URI")
     parser.add_argument(
-        "--model",
-        default=CUSTOM_VOICE_MODEL,
-        help="CustomVoice model name",
+        "--model", default=CUSTOM_VOICE_MODEL, help="CustomVoice model name"
     )
     parser.add_argument(
-        "--base-model",
-        default=BASE_MODEL,
-        help="Base model name for voice cloning",
+        "--base-model", default=BASE_MODEL, help="Base model name for voice cloning"
     )
     parser.add_argument("--speaker", default="Ryan", help="Default speaker")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -262,14 +256,21 @@ async def main() -> None:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    if torch.cuda.is_available():
+        device = "cuda"
+        dtype = torch.bfloat16
+    else:
+        device = "cpu"
+        dtype = torch.float32
 
     _LOGGER.info("Loading CustomVoice model: %s", args.model)
-    custom_voice_model = Qwen3TTSModel.from_pretrained(
+    # Use FasterQwen3TTS which has true streaming support
+    # Note: CUDA graphs only work with CUDA, otherwise uses standard inference
+    custom_voice_model = FasterQwen3TTS.from_pretrained(
         args.model,
-        device_map=device,
+        device=device,
         dtype=dtype,
+        attn_implementation="sdpa",  # Use sdpa for CPU compatibility
     )
     _LOGGER.info("CustomVoice model loaded on %s", device)
 
@@ -277,10 +278,11 @@ async def main() -> None:
     base_model = None
     if clone_voices:
         _LOGGER.info("Loading Base model for voice cloning: %s", args.base_model)
-        base_model = Qwen3TTSModel.from_pretrained(
+        base_model = FasterQwen3TTS.from_pretrained(
             args.base_model,
-            device_map=device,
+            device=device,
             dtype=dtype,
+            attn_implementation="sdpa",
         )
         _LOGGER.info("Base model loaded on %s", device)
         _LOGGER.info("Loaded %d clone voice(s)", len(clone_voices))
