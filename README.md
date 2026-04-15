@@ -1,6 +1,6 @@
 # Wyoming Qwen3-TTS
 
-Wyoming protocol TTS server using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) with [faster-qwen3-tts](https://github.com/your-repo/faster-qwen3-tts) for true streaming support. Compatible with Home Assistant's Wyoming integration.
+Wyoming protocol TTS server using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) with [faster-qwen3-tts](https://pypi.org/project/faster-qwen3-tts/) for true streaming support. Compatible with Home Assistant's Wyoming integration.
 
 ## Features
 
